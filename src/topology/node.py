@@ -48,17 +48,24 @@ class Node(Entity):
         generator (np.random.Generator): random number generator used by node.
         components (Dict[str, Entity]): mapping of local component names to objects.
         first_component_name (str): name of component that first receives incoming qubits.
+        gate_fid (float): fidelity of multi-qubit gates (usually CNOT) that can be performed on the node.
+        meas_fid (float): fidelity of single-qubit measurements (usually CNOT) that can be performed on the node.
     """
 
-    def __init__(self, name: str, timeline: "Timeline", seed=None, component_templates=None):
+    def __init__(self, name: str, timeline: "Timeline", seed=None, component_templates=None, gate_fid=1, meas_fid=1):
         """Constructor for node.
 
-        name (str): name of node instance.
-        timeline (Timeline): timeline for simulation.
-        seed (int): seed for random number generator, default None
-        component_templates (Dict[str:Dict]): args for constructing components.
-            If not None, should map a component type (specified as a string) to constructor args.
-            Default is None.
+        Args:
+            name (str): name of node instance.
+            timeline (Timeline): timeline for simulation.
+            seed (int): seed for random number generator, default None
+            component_templates (Dict[str:Dict]): args for constructing components.
+                If not None, should map a component type (specified as a string) to constructor args.
+                Default is None.
+            gate_fid (float): fidelity of multi-qubit gates (usually CNOT) that can be performed on the node;
+                Default value is 1, meaning ideal gate.
+            meas_fid (float): fidelity of single-qubit measurements (usually CNOT) that can be performed on the node;
+                Default value is 1, meaning ideal measurement.
         """
 
         log.logger.info("Create Node {}".format(name))
@@ -70,6 +77,14 @@ class Node(Entity):
         self.generator = np.random.default_rng(seed)
         self.components = {}
         self.first_component_name = None
+
+        # note that we are assuming homogeneous gates and measurements,
+        # i.e. every gate on one specific node has identical fidelity, and so is measurement.
+        self.gate_fid = gate_fid
+        self.meas_fid = meas_fid
+
+        assert 0 <= gate_fid <= 1 and 0 <= meas_fid <= 1, \
+            "Gate fidelity and measurement fidelity must be between 0 and 1."
 
     def init(self) -> None:
         pass
@@ -256,18 +271,24 @@ class QuantumRouter(Node):
         network_manager (NetworkManager): network management module.
         map_to_middle_node (Dict[str, str]): mapping of router names to intermediate bsm node names.
         app (any): application in use on node.
+        gate_fid (float): fidelity of multi-qubit gates (usually CNOT) that can be performed on the node.
+        meas_fid (float): fidelity of single-qubit measurements (usually CNOT) that can be performed on the node.
     """
 
-    def __init__(self, name, tl, memo_size=50, seed=None, component_templates=None):
+    def __init__(self, name, tl, memo_size=50, seed=None, component_templates=None, gate_fid=1, meas_fid=1):
         """Constructor for quantum router class.
 
         Args:
             name (str): label for node.
             tl (Timeline): timeline for simulation.
             memo_size (int): number of memories to add in the array (default 50).
+            gate_fid (float): fidelity of multi-qubit gates (usually CNOT) that can be performed on the node;
+                Default value is 1, meaning ideal gate.
+            meas_fid (float): fidelity of single-qubit measurements (usually CNOT) that can be performed on the node;
+                Default value is 1, meaning ideal measurement.
         """
 
-        super().__init__(name, tl, seed)
+        super().__init__(name, tl, seed, gate_fid, meas_fid)
         if not component_templates:
             component_templates = {}
 

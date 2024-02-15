@@ -11,7 +11,7 @@ These include 2 classes used by a quantum manager, and one used for individual p
 from abc import ABC
 from typing import Tuple, Dict, List
 
-from numpy import pi, cos, sin, arange, log, log2
+from numpy import pi, cos, sin, arange, log, log2, array, dot
 from numpy.random import Generator
 
 from .quantum_utils import *
@@ -213,22 +213,46 @@ class FreeQuantumState(State):
             quantum_state.entangled_states = entangled_states
             quantum_state.state = new_state
 
-    def random_noise(self, rng: Generator):
-        """Method to add random noise to a single state.
+    def polarization_noise(self, rng: Generator):
+        """Method to add polarization noise to a single state of Photon.
 
-        Chooses a random angle to set the quantum state to (with no phase difference).
+        When invoked, will change the current polarization state of Photon to an orthogonal state,
+            e.g. from vertical to horizontal or from diagonal to anti-diagonal.
 
         Side Effects:
             Modifies the `state` field.
         """
 
-        # TODO: rewrite for entangled states
-        angle = rng.random() * 2 * pi
-        self.state = (complex(cos(angle)), complex(sin(angle)))
+        # TODO: make this more streamlined/fast
 
-    # only for use with entangled state
+        # get random state
+        curr_state = array(self.state)
+        starting_state = curr_state
+        while dot(curr_state, starting_state) == 1:
+            random_sample = rng.random()
+            starting_state = array([random_sample, sqrt(1 - random_sample ** 2)])
+
+        # get state orthonormal to starting
+        proj = dot(starting_state, curr_state) * curr_state
+        new_state = starting_state - proj
+        new_state /= sqrt(sum([abs(a) ** 2 for a in new_state]))
+        self.state = tuple(new_state)
+
+        # if self.state == (complex(1), complex(0)):
+        #     self.state = (complex(0), complex(1))
+        # elif self.state == (complex(0), complex(1)):
+        #     self.state = (complex(1), complex(0))
+        # elif self.state == (complex(sqrt(1 / 2)), complex(sqrt(1 / 2))):
+        #     self.state = (complex(sqrt(1 / 2)), complex(-sqrt(1 / 2)))
+        # elif self.state == (complex(sqrt(1 / 2)), complex(-sqrt(1 / 2))):
+        #     self.state = (complex(sqrt(1 / 2)), complex(sqrt(1 / 2)))
+        # else:
+        #     raise NotImplementedError("photon polarization noise only currently supported for basis states.")
+
     def set_state(self, state: Tuple[complex]):
         """Method to change entangled state of multiple quantum states.
+
+        Note: this means it is only for use with entangled states.
 
         Args:
             state (Tuple[complex]): new coefficients for state.
@@ -258,9 +282,10 @@ class FreeQuantumState(State):
         for qs in self.entangled_states:
             qs.state = state
 
-    # for use with single, unentangled state
     def set_state_single(self, state: Tuple[complex]):
         """Method to unentangle and set the state of a single quantum state object.
+
+        Note: this means it is only for use with a single, unentangled state.
 
         Args:
             state (Tuple[complex]): 2-element list of new complex coefficients.
@@ -381,3 +406,35 @@ class FreeQuantumState(State):
             state.entangled_photons = entangled_list
 
         return res
+
+
+class BellDiagonalState(State):
+    """Class to represent a 2-qubit EPR pair as Bell diagonal state.
+
+    Has 4 diagonal elements of density matrix in Bell basis.
+
+    Attributes:
+        state (np.array): diagonal elements of 2-qubit density matrix in Bell bases. Should be of length 4.
+        keys (List[int]): list of keys (subsystems) associated with this state. Should be length 2.
+    """
+
+    def __init__(self, diag_elems: List[float], keys: List[int]):
+        """Constructor for Bell diagonal state class.
+
+        Args:
+            diag_elems (List[float]): 4 diagonal elements of 2-qubit density matrix in Bell bases. 
+                Default order: Phi+, Phi-, Psi+, Psi- (i.e. I, Z, X, Y errors).
+            keys (List[int]): list of keys to this state in quantum manager. Should be length 2.
+        """
+        super().__init__()
+
+        # check formatting
+        assert all([elem <= 1.001 and elem >= 0 for elem in diag_elems]), \
+            "Illegal value with elem > 1 or elem < 0 in density matrix diagonal elements"
+        assert abs(sum([elem for elem in diag_elems]) - 1) < 1e-5, \
+            "Density matrix diagonal elements do not sum to 1"
+        assert len(keys) == 2, "BellDiagonalState density matrix are only supported for 2-qubit entangled states."
+
+        # note: density matrix diagonal elements are guaranteed to be real from Hermiticity
+        self.state = array(diag_elems, dtype=float)
+        self.keys = keys
