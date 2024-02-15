@@ -1,10 +1,33 @@
-from sequence.entanglement_management.entanglement_protocol import EntanglementProtocol
+from math import sqrt
+from numpy.random import choice
+
 from sequence.kernel.timeline import Timeline
 from sequence.topology.node import Node
 from sequence.components.memory import Memory
 from sequence.components.optical_channel import ClassicalChannel
 from sequence.entanglement_management.purification import BBPSSW
 from sequence.message import Message
+
+
+def entangle_with_fidelity(memo1, memo2, fidelity):
+    # phi plus, phi minus, psi plus, psi minus
+    possible_states = [[complex(sqrt(1 / 2)), complex(0), complex(0), complex(sqrt(1 / 2))],
+                       [complex(sqrt(1 / 2)), complex(0), complex(0), -complex(sqrt(1 / 2))],
+                       [complex(0), complex(sqrt(1 / 2)), complex(sqrt(1 / 2)), complex(0)],
+                       [complex(0), complex(sqrt(1 / 2)), -complex(sqrt(1 / 2)), complex(0)]]
+    desired_state = 2
+
+    # set correct probabilities
+    probabilities = [(1 - fidelity) / 3] * 4
+    probabilities[desired_state] = fidelity
+
+    # choose state randomly to assign
+    state_ind = choice(4, p=probabilities)
+
+    # assign state to memories
+    qm = memo1.timeline.quantum_manager
+    keys = [memo1.qstate_key, memo2.qstate_key]
+    qm.set(keys, possible_states[state_ind])
 
 
 class SimpleManager:
@@ -48,11 +71,14 @@ def entangle_memory(memo1: Memory, memo2: Memory, fidelity: float):
     memo1.reset()
     memo2.reset()
 
+    # set quantum state
+    entangle_with_fidelity(memo1, memo2, fidelity)
+
+    # set classical tracking variables
     memo1.entangled_memory['node_id'] = memo2.owner.name
     memo1.entangled_memory['memo_id'] = memo2.name
     memo2.entangled_memory['node_id'] = memo1.owner.name
     memo2.entangled_memory['memo_id'] = memo1.name
-
     memo1.fidelity = memo2.fidelity = fidelity
 
 
@@ -67,38 +93,39 @@ def pair_protocol(node1: Node, node2: Node):
     p2.set_others(p1.name, node1.name, [kept_memo_1_name, meas_memo_1_name])
 
 
-tl = Timeline()
+if __name__ == "__main__":
+    tl = Timeline()
 
-node1 = PurifyNode('node1', tl)
-node2 = PurifyNode('node2', tl)
-node1.set_seed(0)
-node2.set_seed(1)
+    node1 = PurifyNode('node1', tl)
+    node2 = PurifyNode('node2', tl)
+    node1.set_seed(0)
+    node2.set_seed(1)
 
-cc0 = ClassicalChannel('cc0', tl, 1000, 1e9)
-cc1 = ClassicalChannel('cc1', tl, 1000, 1e9)
-cc0.set_ends(node1, node2.name)
-cc1.set_ends(node2, node1.name)
+    cc0 = ClassicalChannel('cc0', tl, 1000, 1e9)
+    cc1 = ClassicalChannel('cc1', tl, 1000, 1e9)
+    cc0.set_ends(node1, node2.name)
+    cc1.set_ends(node2, node1.name)
 
-kept_memo_1 = node1.components[node1.resource_manager.kept_memo_name]
-kept_memo_2 = node2.components[node2.resource_manager.kept_memo_name]
-meas_memo_1 = node1.components[node1.resource_manager.meas_memo_name]
-meas_memo_2 = node2.components[node2.resource_manager.meas_memo_name]
+    kept_memo_1 = node1.components[node1.resource_manager.kept_memo_name]
+    kept_memo_2 = node2.components[node2.resource_manager.kept_memo_name]
+    meas_memo_1 = node1.components[node1.resource_manager.meas_memo_name]
+    meas_memo_2 = node2.components[node2.resource_manager.meas_memo_name]
 
-tl.init()
-for i in range(10):
-    entangle_memory(kept_memo_1, kept_memo_2, 0.9)
-    entangle_memory(meas_memo_1, meas_memo_2, 0.9)
+    tl.init()
+    for i in range(10):
+        entangle_memory(kept_memo_1, kept_memo_2, 0.9)
+        entangle_memory(meas_memo_1, meas_memo_2, 0.9)
 
-    node1.resource_manager.create_protocol()
-    node2.resource_manager.create_protocol()
+        node1.resource_manager.create_protocol()
+        node2.resource_manager.create_protocol()
 
-    pair_protocol(node1, node2)
+        pair_protocol(node1, node2)
 
-    node1.protocols[0].start()
-    node2.protocols[0].start()
-    tl.run()
+        node1.protocols[0].start()
+        node2.protocols[0].start()
+        tl.run()
 
-    print(kept_memo_1.name, kept_memo_1.entangled_memory,
-          kept_memo_1.fidelity)
-    print(meas_memo_1.name, meas_memo_1.entangled_memory,
-          meas_memo_1.fidelity)
+        print(kept_memo_1.name, kept_memo_1.entangled_memory,
+              kept_memo_1.fidelity)
+        print(meas_memo_1.name, meas_memo_1.entangled_memory,
+              meas_memo_1.fidelity)
