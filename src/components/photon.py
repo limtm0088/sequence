@@ -67,7 +67,7 @@ class Photon:
         self.wavelength: int = wavelength
         self.location: Entity = location
         self.encoding_type: Dict[str, Any] = encoding_type
-        self.is_null: bool = False
+        self.is_null: bool = False  # TODO: update this with parameter from encoding scheme?
         self.loss: float = 0
         self.use_qm = use_qm
 
@@ -109,10 +109,17 @@ class Photon:
         else:
             self.quantum_state.combine_state(photon.quantum_state)
 
-    def random_noise(self, rng: "Generator"):
-        """Method to add random noise to photon's state (see `QuantumState` module)."""
+    def polarization_noise(self, rng: "Generator"):
+        """Method to add polarization noise to photon's state.
 
-        self.quantum_state.random_noise(rng)
+        Will map a photon's state to the orthogonal state.
+        See `QuantumState.polarization_noise()` method.
+        """
+        
+        assert self.encoding_type["name"] == "polarization", \
+            "Optical fiber noise is only applicable to polarization encoding at present."
+
+        self.quantum_state.polarization_noise(rng)
 
     def set_state(self, state):
         if self.use_qm:
@@ -178,5 +185,5 @@ class Photon:
 
     def add_loss(self, loss: float):
         assert 0 <= loss <= 1
-        assert self.encoding_type["name"] == "single_atom"
+        assert self.encoding_type.get("keep_photon", False)
         self.loss = 1 - (1 - self.loss) * (1 - loss)

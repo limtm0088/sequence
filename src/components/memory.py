@@ -10,6 +10,7 @@ from math import inf
 from typing import Any, List, TYPE_CHECKING, Dict, Callable, Union
 
 from scipy import stats
+from numpy import exp, array
 
 if TYPE_CHECKING:
     from ..entanglement_management.entanglement_protocol import EntanglementProtocol
@@ -19,12 +20,33 @@ from .photon import Photon
 from ..kernel.entity import Entity
 from ..kernel.event import Event
 from ..kernel.process import Process
-from ..utils.encoding import single_atom
+from ..utils.encoding import single_atom, single_heralded
 
 
 def const(t):
-    """Constant function thal always returns 1. For AFC memory default spin efficiency."""
+    """Constant function that always returns 1. For AFC memory default spin efficiency."""
     return 1
+
+
+# define helper functions for analytical BDS decoherence implementation, reference see recurrence protocol paper
+def _p_id(x_rate, y_rate, z_rate, t):
+    val = (1 + exp(-2*(x_rate+y_rate)*t) + exp(-2*(x_rate+z_rate)*t) + exp(-2*(z_rate+y_rate)*t)) / 4
+    return val
+
+
+def _p_xerr(x_rate, y_rate, z_rate, t):
+    val = (1 - exp(-2*(x_rate+y_rate)*t) - exp(-2*(x_rate+z_rate)*t) + exp(-2*(z_rate+y_rate)*t)) / 4
+    return val
+
+
+def _p_yerr(x_rate, y_rate, z_rate, t):
+    val = (1 - exp(-2*(x_rate+y_rate)*t) + exp(-2*(x_rate+z_rate)*t) - exp(-2*(z_rate+y_rate)*t)) / 4
+    return val
+
+
+def _p_zerr(x_rate, y_rate, z_rate, t):
+    val = (1 + exp(-2*(x_rate+y_rate)*t) - exp(-2*(x_rate+z_rate)*t) - exp(-2*(z_rate+y_rate)*t)) / 4
+    return val
 
 
 # array of single atom memories
@@ -103,6 +125,8 @@ class Memory(Entity):
     This class models a single-atom memory, where the quantum state is stored as the spin of a single ion.
     This class will replace the older implementation once completed.
 
+    Now the single-qubit quantum memory class starts to support storage decoherence in the form of Pauli channels.
+
     Attributes:
         name (str): label for memory instance.
         timeline (Timeline): timeline for simulation.
@@ -113,10 +137,19 @@ class Memory(Entity):
         wavelength (float): wavelength (in nm) of emitted photons.
         qstate_key (int): key for associated quantum state in timeline's quantum manager.
         entangled_memory (Dict[str, Any]): tracks entanglement state of memory.
+        decoherence_errors (List[float]): assuming the memory (qubit) decoherence channel being Pauli channel,
+            probability distribution of X, Y, Z Pauli errors;
+            (default value is -1, meaning not using BDS or further density matrix representation).
+        generation_time (float): time when the EPR pair is first generated (float or int depends on timing unit)
+            (default -1 before generation or not used).
+        last_update_time (float): last time when the EPR pair is updated (usually when decoherence channel applied),
+            used to determine decoherence channel
+            (default -1 before generation or not used).
+        is_in_application (bool): whether the quantum memory is involved in application after successful distribution of EPR pair
     """
 
     def __init__(self, name: str, timeline: "Timeline", fidelity: float, frequency: float,
-                 efficiency: float, coherence_time: float, wavelength: int):
+                 efficiency: float, coherence_time: float, wavelength: int, decoherence_errors: List[float] = None):
         """Constructor for the Memory class.
 
         Args:
@@ -127,24 +160,43 @@ class Memory(Entity):
             efficiency (float): efficiency of memories.
             coherence_time (float): average time (in s) that memory state is valid.
             wavelength (int): wavelength (in nm) of photons emitted by memories.
+            decoherence_errors (List[float]): assuming the memory (qubit) decoherence channel being Pauli channel,
+                probability distribution of X, Y, Z Pauli errors
+                (default value is None, meaning not using BDS or further density matrix representation)
         """
 
         super().__init__(name, timeline)
-        assert 0 <= fidelity <= 1
-        assert 0 <= efficiency <= 1
+        assert 0 <= fidelity <= 1, "Fidelity should be between 0 and 1."
+        assert 0 <= efficiency <= 1, "Efficiency should be between 0 and 1."
 
         self.fidelity = 0
         self.raw_fidelity = fidelity
         self.frequency = frequency
         self.efficiency = efficiency
-        self.coherence_time = coherence_time  # coherence time in seconds
+        self.coherence_time = coherence_time  # coherence time in seconds, also used to determine the decoherence rate
+        self.decoherence_rate = 1 / self.coherence_time  # rate of decoherence to implement time dependent decoherence
         self.wavelength = wavelength
         self.qstate_key = timeline.quantum_manager.new()
         self.memory_array = None
 
-        # for photons
+        self.decoherence_errors = decoherence_errors
+        if self.decoherence_errors is not None:
+            assert len(self.decoherence_errors) == 3 and abs(sum(self.decoherence_errors) - 1) < 0.001, \
+                "Decoherence errors refer to probabilities for each Pauli error to happen if an error happens, thus should be normalized."
+
+        # TODO: tracking of time when entanglement status is modified has been done at least partially in memory_manager
+        # default value is -1 when EPR pair is not generated or decoherence over time is not considered
+        self.generation_time = -1
+        self.last_update_time = -1
+
+        self.is_in_application = False  # initially quantum memory is guaranteed to be not involved in any application
+
+        # for photons in double-heralded Barrett-Kok protocol
         self.encoding = copy(single_atom)
         self.encoding["raw_fidelity"] = self.raw_fidelity
+
+        # for photons in general single-heralded EG protocols
+        self.encoding_sh = copy(single_heralded)
 
         # keep track of previous BSM result (for entanglement generation)
         # -1 = no result, 0/1 give detector number
@@ -165,13 +217,16 @@ class Memory(Entity):
     def set_memory_array(self, memory_array: MemoryArray):
         self.memory_array = memory_array
 
-    def excite(self, dst="") -> None:
+    def excite(self, dst="", protocol="bk") -> None:
         """Method to excite memory and potentially emit a photon.
 
+        Mainly for EG protocols, which can be double-heralded Barrett-Kok protocol or single-heralded protocols.
         If it is possible to emit a photon, the photon may be marked as null based on the state of the memory.
 
         Args:
             dst (str): name of destination node for emitted photon (default "").
+            protocol (str): name of EG protocol considered (default "bk" standing for Barrett-Kok protocol).
+                Valid values are "bk" or "sh" (for single heralded).
 
         Side Effects:
             May modify quantum state of memory.
@@ -183,8 +238,15 @@ class Memory(Entity):
             return
 
         # create photon
-        photon = Photon("", self.timeline, wavelength=self.wavelength, location=self.name, encoding_type=self.encoding,
-                        quantum_state=self.qstate_key, use_qm=True)
+        if protocol == "bk":
+            photon = Photon("", self.timeline, wavelength=self.wavelength, location=self.name, encoding_type=self.encoding,
+                            quantum_state=self.qstate_key, use_qm=True)
+        elif protocol == "sh":
+            photon = Photon("", self.timeline, wavelength=self.wavelength, location=self.name, encoding_type=self.encoding_sh,
+                            quantum_state=self.qstate_key, use_qm=True)
+        else:
+            raise ValueError("Invalid protocol type '{}' specified for memory.excite()".format(protocol))
+
         photon.timeline = None  # facilitate cross-process exchange of photons
         photon.is_null = True
         photon.add_loss(1 - self.efficiency)
@@ -202,17 +264,26 @@ class Memory(Entity):
 
         Is scheduled automatically by the `set_plus` memory operation.
 
+        If the quantum memory has been explicitly involved in application after entanglement distribution, do not expire.
+            Some simplified applications do not necessarily need to modify the is_in_application attribute.
+            Some more complicated applications, such as probe state preparation for distributed quantum sensing,
+            may change is_in_application attribute to keep memory from expiring during study.
+
         Side Effects:
-            Will notify upper entities of expiration via the `pop` interface.
-            Will modify the quantum state of the memory.
+            May notify upper entities of expiration via the `pop` interface.
+            May modify the quantum state of the memory.
         """
 
-        if self.excited_photon:
-            self.excited_photon.is_null = True
+        if self.is_in_application:
+            pass
 
-        self.reset()
-        # pop expiration message
-        self.notify(self)
+        else:
+            if self.excited_photon:
+                self.excited_photon.is_null = True
+
+            self.reset()
+            # pop expiration message
+            self.notify(self)
 
     def reset(self) -> None:
         """Method to clear quantum memory.
@@ -224,6 +295,8 @@ class Memory(Entity):
         """
 
         self.fidelity = 0
+        self.generation_time = -1
+        self.last_update_time = -1
 
         self.timeline.quantum_manager.set([self.qstate_key], [complex(1), complex(0)])
         self.entangled_memory = {'node_id': None, 'memo_id': None}
@@ -249,6 +322,47 @@ class Memory(Entity):
         # schedule expiration
         if self.coherence_time > 0:
             self._schedule_expiration()
+
+    def bds_decohere(self) -> None:
+        """Method to decohere stored BDS in quantum memory according to the single-qubit Pauli channels.
+
+        During entanglement distribution (before application phase),
+        BDS decoherence can be treated analytically (see entanglement purification paper for explicit formulae).
+
+        Side Effects:
+            Will modify BDS diagonal elements and last_update_time.
+        """
+        
+        if self.decoherence_errors is None:
+            # if not considering time-dependent decoherence then do nothing
+            pass
+
+        else:
+            time = self.timeline.now() - self.last_update_time  # duration of memory idling
+
+            x_rate, y_rate, z_rate = self.decoherence_rate * self.decoherence_errors[0], \
+                                     self.decoherence_rate * self.decoherence_errors[1], \
+                                     self.decoherence_rate * self.decoherence_errors[2]
+            p_I, p_X, p_Y, p_Z = _p_id(x_rate, y_rate, z_rate, time), \
+                                 _p_xerr(x_rate, y_rate, z_rate, time), \
+                                 _p_yerr(x_rate, y_rate, z_rate, time), \
+                                 _p_zerr(x_rate, y_rate, z_rate, time)
+            
+            state_now = self.timeline.quantum_manager.states[self.qstate_key].state  # current diagonal elements
+            transform_mtx = array([[p_I, p_Z, p_X, p_Y],
+                                     [p_Z, p_I, p_Y, p_X],
+                                     [p_X, p_Y, p_I, p_Z],
+                                     [p_Y, p_X, p_Z, p_I]])  # transform matrix for diagonal elements
+            state_new = transform_mtx @ state_now  # new diagonal elements after decoherence transformation
+
+            # update the quantum state stored in quantum manager for self and entangled memory
+            keys = self.timeline.quantum_manager.states[self.qstate_key].keys
+            self.timeline.quantum_manager.set(keys, state_new)
+
+        # update the last_update_time of self
+        # note that the attr of entangled memory should not be updated right now,
+        # because decoherence has not been applied there
+        self.last_update_time = self.timeline.now()
 
     def _schedule_expiration(self) -> None:
         if self.expiration_event is not None:
